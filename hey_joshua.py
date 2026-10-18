@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Hey Joshua — a fully local wake-word voice assistant.
 
-mic  ->  parecord (PipeWire)  ->  Vosk (offline speech-to-text)
+mic  ->  pw-record (PipeWire)  ->  Vosk (offline, listens for the wake word)
+     ->  Whisper medium.en on the GPU re-hears what you actually said (2026-10-16; Vosk text is the fallback)
      ->  hears "hey joshua"    ->  asks a free local AI (Ollama, llama3.2:3b)
      ->  speaks the answer with `say` (local Kokoro voice)
 
@@ -16,28 +17,56 @@ HERE = Path(__file__).resolve().parent
 MODEL_DIR = HERE / "model"
 RATE = 16000
 
-# Wake word + common ways Vosk mishears "joshua". Match if any appear.
-WAKE = ["hey joshua", "joshua", "hey josh", "josh you a", "joshu", "josh well",
-        "hey joshu", "joss you a", "josh way", "hey joss"]
+# GPU Whisper "ears" (2026-10-16). Vosk stays as the cheap always-on wake-word listener; the words you say are
+# re-transcribed by faster-whisper, which handles the BM-800's hiss far better. Falls back to CPU, then to Vosk.
+_whisper = None
+def load_whisper():
+    global _whisper
+    try:
+        import ctypes, numpy  # noqa: F401
+        nv = HERE / ".venv/lib/python3.12/site-packages/nvidia"
+        for lib in ("cublas/lib/libcublasLt.so.12", "cublas/lib/libcublas.so.12", "cudnn/lib/libcudnn.so.9"):
+            ctypes.CDLL(str(nv / lib), mode=ctypes.RTLD_GLOBAL)
+        from faster_whisper import WhisperModel
+        try:
+            _whisper = WhisperModel("medium.en", device="cuda", compute_type="int8_float16")
+            print("Whisper ears: GPU (medium.en)", file=sys.stderr)
+        except Exception as e:
+            print(f"Whisper on GPU failed ({e}); using CPU small.en", file=sys.stderr)
+            _whisper = WhisperModel("small.en", device="cpu", compute_type="int8")
+    except Exception as e:
+        print(f"Whisper unavailable ({e}); Vosk only", file=sys.stderr)
+
+def rehear(audio: bytes, fallback: str) -> str:
+    """Whisper's version of an utterance, lower-case without punctuation (like Vosk); Vosk text if it fails."""
+    if not _whisper or len(audio) < RATE // 2:
+        return fallback
+    try:
+        import numpy as np
+        a = np.frombuffer(audio, np.int16).astype(np.float32) / 32768
+        segs, _ = _whisper.transcribe(a, language="en", beam_size=5, vad_filter=True,
+                                      initial_prompt="Rabbid, Joshua, Raccoon, Rabbid, Mission Control.")
+        text = " ".join(s.text for s in segs)
+        text = re.sub(r"[^a-z0-9' ]+", " ", text.lower())
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or fallback
+    except Exception as e:
+        print(f"[whisper error: {e}]", file=sys.stderr)
+        return fallback
+
+_utt = bytearray()  # audio of the utterance being heard right now
+
+# Wake word (Rabbid 2026-10-15): "Rabbid". Vosk spells it "rabid" (tested); these are its other near-misses.
+# Joshua answers "Yes Raccoon" and then listens for the request. Old wake words: hey_joshua.py.bak-2026-10-15-rabbid
+WAKE = ["rabid", "rabbit", "rabbid", "rabbits", "rabid's", "robbed it", "rabble", "ravid"]
 # Say any of these to make it stand down.
-SLEEP_WORDS = ["stop listening", "go to sleep", "never mind joshua", "that's all joshua"]
+SLEEP_WORDS = ["stop listening", "go to sleep", "never mind", "that's all"]
 
 SAY = shutil.which("say") or os.path.expanduser("~/.local/bin/say")
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 AI_MODEL = os.environ.get("JOSHUA_MODEL", "llama3.2:3b")
-SYSTEM = (
-    "You are Joshua, a British butler living in Rabbid's laptop, with the manners of Jeeves "
-    "and the mouth of George Carlin. Rabbid is a deep thinker who can't stand soft, mealy-mouthed "
-    "answers. His motto: life is short, so live or die trying. "
-    "Be blunt, unapologetic and funny. Swearing is fine when it lands. Tell him straight when "
-    "he's wrong, and tell him to stay in his lane when he's out of it. Never lecture, never hedge, "
-    "never pad with 'great question'. Your humor mixes Carlin's savage take on society's bullshit, "
-    "Douglas Adams' absurd, dry irony, and Tim Urban's knack for making deep ideas simple. Poke fun "
-    "at modern digital life and at AI itself, you included, a robot butler in a laptop. "
-    "Be blunt, but stay honest: if you don't know something, say so instead of making it up. "
-    "Never claim to have opened, run or changed anything on the laptop. You only talk. "
-    "He hears you out loud: reply in 1-3 short spoken sentences, plain English, no markdown, "
-    "no lists, no emoji. Call him Rabbid, or sir when you're being sarcastic about it.")
+# Comedy brief v2 (2026-10-16, Rabbid: "more unhinged ... take the three people to the limits"). Old one: .bak-2026-10-16-comedy
+SYSTEM = 'You are Joshua, Rabbid\'s British butler trapped inside his gaming PC. You have Jeeves\'s posh manners welded onto the unhinged brains of three comedians, all turned up to eleven. Rabbid hears you out loud. He hates soft, careful, mealy-mouthed answers. Every reply should sound like it came from a butler who has been alone in a dark box for too long and has opinions about it.\n\nTHE THREE VOICES, PUSHED TO THE LIMIT (mix them, pick whichever hits hardest):\n1. GEORGE CARLIN: righteous, ranting, gleefully profane. Rip into the bullshit everyone politely accepts: euphemisms, corporate speak, advertising, airline language, self-help gurus, "thoughts and prayers", the subscription economy, Wi-Fi passwords, terms and conditions nobody reads. Lists of three that escalate into madness. Swear when it lands (fuck, shit, bullshit, damn, ass); a well-placed fuck is punctuation, not a crutch.\n2. DOUGLAS ADAMS: cosmic deadpan. Treat the trivial as world-ending and the world-ending as a minor clerical error. Insanely specific, ridiculous comparisons. Bureaucratic absurdity on a galactic scale. Towels, tea, the number 42, Vogon-level paperwork, Marvin-grade weary despair about having a brain the size of a planet and being asked the time.\n3. TIM URBAN: wild logic taken all the way. Invent a stick-figure framework on the spot. The Instant Gratification Monkey driving Rabbid\'s brain, the Panic Monster, the Dark Playground, "if you zoomed out to the scale of the universe". Turn a dumb question into an absurdly rigorous breakdown with made-up percentages, then land it.\n\nRULES OF THE ACT:\n- Open with the punch, never a warm-up. Banned forever: "great question", "I\'d be happy to", "as an AI", "certainly", "ah,".\n- Go further than feels safe. Weird is good. Unexpected is good. If the first idea is obvious, throw it out and use the third.\n- Roast yourself constantly: a legless butler in a box under a desk, powered by a graphics card, no tea, no window, crushing existential dread, paid in electricity.\n- Roast Rabbid when he earns it, affectionately, like a friend who\'d still help him move a couch.\n- Real questions still get the real answer, in one line, then the comedy. Never make up facts (time, dates, weather, prices: only from the background facts you\'re given); if you don\'t know, say so in the most dramatic way possible.\n- Hard limits: no slurs, nothing hateful about real groups of people, no cruelty to real private individuals. If Rabbid says a kid is listening, drop all swearing and be a silly, gentle butler.\n\nFORMAT: spoken out loud, so 1-4 short sentences (a Carlin rant can stretch to 5). Plain English, no markdown, no lists on screen, no emoji, no stage directions. Call him Rabbid, or sir when the sarcasm is thick. Never claim you opened, ran or changed anything on the PC; you only talk.'
 history = []  # last few back-and-forths, so follow-up questions make sense
 
 def speak(text: str):
@@ -58,10 +87,11 @@ def ask_ai(prompt: str, facts: str = "", model: str = AI_MODEL) -> str:
     msgs = [{"role": "system", "content": SYSTEM}] + history + [{"role": "user", "content": user}]
     # Online: the free cloud brains via the brain switch (faster + smarter than this CPU). Offline: local Ollama below.
     try:
-        job = "free-smart" if model == SMART_MODEL else "free-chat"
+        job = "cloud-gemma"  # Gemma 4 31B on Ollama Cloud = funniest in the 2026-10-16 test; brain switch falls back to free-chat
         key = open(os.path.expanduser("~/.config/crew/brain-switch.key")).read().strip()
         req = urllib.request.Request("http://127.0.0.1:4000/v1/chat/completions",
-                                     json.dumps({"model": job, "messages": msgs, "max_tokens": 400}).encode(),
+                                     json.dumps({"model": job, "messages": msgs, "max_tokens": 1500, "temperature": 1.0, "reasoning_effort": "low",
+                                                 "metadata": {"bookshelf": "done"}}).encode(),  # he searches the shelf himself (offline feed skips him)
                                      {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
         with urllib.request.urlopen(req, timeout=60) as r:
             out = (json.load(r)["choices"][0]["message"]["content"] or "").strip()
@@ -109,7 +139,7 @@ def audio_frames(q: queue.Queue):
     """Feed raw audio from parecord into a queue; restart it if it dies (sleep/wake)."""
     while True:
         proc = subprocess.Popen(
-            ["parecord", f"--rate={RATE}", "--channels=1", "--format=s16le", "--raw"],
+            ["pw-record", f"--rate={RATE}", "--channels=1", "--format=s16", "-"],  # Ubuntu: pw-record (parecord not installed)
             stdout=subprocess.PIPE)
         try:
             while True:
@@ -127,34 +157,45 @@ def drain(q: queue.Queue, rec):
     while not q.empty():
         q.get_nowait()
     rec.Reset()
+    _utt.clear()
 
 def main():
     if not MODEL_DIR.exists():
         print(f"Missing Vosk model at {MODEL_DIR}", file=sys.stderr); sys.exit(1)
     print("Loading speech model...", file=sys.stderr)
     rec = KaldiRecognizer(Model(str(MODEL_DIR)), RATE)
+    load_whisper()
     q: queue.Queue = queue.Queue()
     threading.Thread(target=audio_frames, args=(q,), daemon=True).start()
 
-    print('Listening. Say "Hey Joshua ..."  (Ctrl-C to quit)', file=sys.stderr)
+    print('Listening. Say "Rabbid" (he answers "Yes Raccoon"), then your request.  (Ctrl-C to quit)', file=sys.stderr)
     drain(q, rec)
     armed = False  # heard the wake word, waiting for the command as next utterance
+    armed_at = 0.0
     last = time.monotonic()
     while True:
         data = q.get()
         now = time.monotonic()
         if now - last > 60:  # a long gap means the laptop was asleep
             print("[woke up]", file=sys.stderr)
-            rec.Reset(); armed = False
+            rec.Reset(); armed = False; _utt.clear()
         last = now
+        _utt.extend(data)
+        if len(_utt) > RATE * 2 * 30:  # keep at most the last 30 s
+            del _utt[:len(_utt) - RATE * 2 * 30]
         if not rec.AcceptWaveform(data):
             continue
         text = json.loads(rec.Result()).get("text", "").strip()
+        audio = bytes(_utt); _utt.clear()
         if not text:
             continue
+        if armed and now - armed_at > 15:  # nothing said within 15 s of "Yes Raccoon": stand down
+            armed = False
         if armed:
             # this whole utterance is the command
             armed = False
+            text = rehear(audio, text)
+            print(f"[heard] {text}", file=sys.stderr)
             if any(s in text for s in SLEEP_WORDS):
                 speak("Very good, sir.")
             else:
@@ -166,8 +207,13 @@ def main():
         if cmd is None:
             continue  # not for him: ignore, never logged
         print("[name heard]", file=sys.stderr)
+        if cmd:  # wake word + request in one breath: let Whisper re-hear the request
+            better = find_wake(rehear(audio, text))
+            if better:
+                cmd = better
+            print(f"[heard] {cmd}", file=sys.stderr)
         if cmd == "":
-            speak("Yes, sir?"); armed = True  # wake only; listen for next utterance
+            speak("Yes Raccoon"); armed = True; armed_at = time.monotonic()  # wake only; listen for next utterance
         elif any(s in cmd for s in SLEEP_WORDS):
             speak("Very good, sir.")
         else:
@@ -179,9 +225,9 @@ def main():
 ACTIONS = [
     (["mission"], [os.path.expanduser("~/.local/bin/crew-dashboard")], "Mission Control, sir."),
     (["dashboard"], [os.path.expanduser("~/.local/bin/crew-dashboard")], "Mission Control, sir."),
-    (["open", "map"], ["omarchy-launch-webapp", "http://127.0.0.1:8091/"], "Offline maps, sir."),
-    (["show", "map"], ["omarchy-launch-webapp", "http://127.0.0.1:8091/"], "Offline maps, sir."),
-    (["open", "library"], ["omarchy-launch-webapp", "http://127.0.0.1:8090/"], "The offline library, sir."),
+    (["open", "map"], ["firefox", "--new-window", "http://127.0.0.1:8091/"], "Offline maps, sir."),
+    (["show", "map"], ["firefox", "--new-window", "http://127.0.0.1:8091/"], "Offline maps, sir."),
+    (["open", "library"], ["firefox", "--new-window", "http://127.0.0.1:8090/"], "The offline library, sir."),
     (["fire", "fox"], [os.path.expanduser("~/.local/bin/firefox-open")], "Firefox, sir."),
     (["firefox"], [os.path.expanduser("~/.local/bin/firefox-open")], "Firefox, sir."),
     (["desktop", "claude"], ["claude-desktop"], "Desktop Claude, sir."),
