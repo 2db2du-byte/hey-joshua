@@ -1,0 +1,12 @@
+[Unit]
+Description=Joshua's HUD (web interface, port 8899)
+After=joshua-brain.service joshua-library.service
+
+[Service]
+WorkingDirectory=@JOSHUA_DIR@/hud
+ExecStart=@JOSHUA_DIR@/.venv/bin/python @JOSHUA_DIR@/hud/server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

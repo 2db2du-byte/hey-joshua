@@ -1,0 +1,10 @@
+[Unit]
+Description=Joshua's bookshelf (Kiwix library server, port 8090)
+
+[Service]
+ExecStart=/usr/bin/kiwix-serve --address=127.0.0.1 --port=8090 --library @JOSHUA_DIR@/bookshelf/library.xml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

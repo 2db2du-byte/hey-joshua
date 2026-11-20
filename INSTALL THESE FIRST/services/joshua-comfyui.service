@@ -1,0 +1,10 @@
+[Unit]
+Description=ComfyUI image engine for Joshua Studio (port 8188)
+
+[Service]
+WorkingDirectory=@JOSHUA_DIR@/ComfyUI
+ExecStart=@JOSHUA_DIR@/ComfyUI/.venv/bin/python main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

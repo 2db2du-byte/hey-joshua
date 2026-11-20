@@ -1,0 +1,14 @@
+[Unit]
+Description=Joshua's brain (private Ollama on NVMe, port 11435)
+
+[Service]
+ExecStart=@JOSHUA_DIR@/ollama/bin/ollama serve
+Environment=OLLAMA_MODELS=@JOSHUA_DIR@/models/llm
+Environment=OLLAMA_HOST=127.0.0.1:11435
+Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,6 +1,16 @@
-__pycache__/
-*.pyc
+# never publish: personal memory, keys live in ~/.config/joshua anyway
+memory/
+# big stuff the installer/scripts fetch
+models/
+ollama/
+ComfyUI/
 .venv/
-*.env
-*.key
-*.bak*
+bookshelf/zim/
+bookshelf/library.xml
+bookshelf/downloads.json
+bookshelf/*.log
+bookshelf/toolbox/
+INSTALL THESE FIRST/debs/
+INSTALL THESE FIRST/ubuntu-iso/
+__pycache__/
+*.bak-*
