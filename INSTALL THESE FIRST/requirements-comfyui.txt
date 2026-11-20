@@ -104,7 +104,7 @@ rpds-py==2026.9.1
 safetensors==0.8.0
 scipy==1.18.1
 sentencepiece==0.2.3
-setuptools==78.1.0
+setuptools==84.1.0
 shellingham==1.5.4
 simpleeval==1.0.8
 smmap==5.0.3
